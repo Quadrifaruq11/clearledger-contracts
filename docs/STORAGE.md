@@ -313,6 +313,10 @@ EscrowEvent {
 
 #### SEP-41 Share Transfers
 
+See [SEP-41 LP Share Token: Design and Behavior](SEP41_DESIGN.md) for the full
+method table, authorization matrix, allowance expiry semantics, and known
+deviations.
+
 LP shares move between addresses through two public entry points that share
 one balance-movement path (`move_shares`) and emit the same standard
 `transfer(from, to, amount)` event:

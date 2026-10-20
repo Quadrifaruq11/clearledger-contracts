@@ -430,7 +430,8 @@ nothing.
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
 `amount` is the new **total** grant (not a delta), and `amount == 0` is the
-revoke signal.
+revoke signal. See [SEP-41 LP Share Token: Design and Behavior](SEP41_DESIGN.md#allowance-expiry-semantics)
+for the ledger-based expiration rules and event-shape deviations.
 
 | Field | Type | Description |
 |-------|------|-------------|
