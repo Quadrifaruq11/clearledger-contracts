@@ -59,6 +59,38 @@ impl PoolFactoryContract {
         events::contract_initialized(&env, &admin);
     }
 
+    /// Transfers factory admin ownership to `new_admin`.
+    ///
+    /// The factory admin is the trust anchor for the pools it manages: it is
+    /// the only address allowed to register assets and is copied into every
+    /// newly deployed pool as that pool's admin and treasury. Moving it is
+    /// therefore deliberately a two-party operation.
+    ///
+    /// # Auth
+    /// Requires authorization from both the current admin (read from storage)
+    /// and `new_admin`. Requiring the incoming admin to sign prevents ownership
+    /// from being forced onto an address that never consented (for example a
+    /// typo), while requiring the current admin prevents anyone else from
+    /// seizing the factory. Neither signature alone is sufficient. After the
+    /// call succeeds every admin-gated entry point (`register_asset`,
+    /// `register_existing_pool`, and a subsequent `transfer_ownership`) checks
+    /// the *new* admin, so the old key has no residual authority.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the factory has not been initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.transfer_ownership(&new_admin);
+    /// ```
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        let admin = Self::admin(&env);
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+    }
+
     /// Deploys a new pool instance for an asset and records it as that asset's
     /// pool.
     ///

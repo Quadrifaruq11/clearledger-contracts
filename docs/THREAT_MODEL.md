@@ -142,6 +142,10 @@ and ownership transfer. Compromise of this key has a high blast radius.
 **Mitigation:**
 - `transfer_ownership` requires dual auth (current + new admin) — a stolen key
   cannot transfer ownership to the attacker without the new key also signing.
+- On the pool factory the admin is the asset-registration trust boundary: it is
+  copied into every newly deployed pool as that pool's admin and treasury. A
+  factory ownership transfer therefore needs both signatures, and once it lands
+  the old key can no longer register assets or move ownership again.
 - The escrow `handle_default` has an alternative caller (pool contract), so
   admin compromise does not grant unilateral fund recovery.
 - **Planned:** Multi-sig admin (see [Roadmap section in README](../README.md#known-centralization-risks--roadmap)).

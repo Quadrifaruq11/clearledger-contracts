@@ -842,6 +842,23 @@ Emitted when `register_existing_pool()` registers a pre-existing pool for an ass
 
 ---
 
+### `ownership_transferred`
+
+Emitted when factory admin ownership moves to a new admin. Asset registration
+authority moves with it, so indexers should key admin-gated calls off the most
+recent transfer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"ownership_transferred"` |
+| `topic[1]` | `Address` | Previous admin address |
+| **Data** | `Address` | New admin address |
+
+**Emitted by:** `transfer_ownership()` in `contracts/pool_factory/src/lib.rs`
+
+---
+
 ## Cross-Reference: Duplicate Event Names
 
 Note that some event names appear in multiple contracts. When indexing, filter by contract address:

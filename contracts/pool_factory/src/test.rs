@@ -5,9 +5,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     xdr::ToXdr,
-    Address, Bytes, BytesN, Env, Map, String, Symbol, TryFromVal,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal,
 };
 use clearledger_escrow::EscrowContractClient;
 use clearledger_invoice::InvoiceContractClient;
@@ -263,6 +263,248 @@ fn test_initialize_twice_panics() {
     let admin = Address::generate(&env);
     factory_client.initialize(&admin);
     factory_client.initialize(&admin);
+}
+
+fn stored_admin(te: &TestEnv) -> Address {
+    te.env.as_contract(&te.factory_id, || {
+        te.env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("factory should have an admin")
+    })
+}
+
+/// Ownership transfer is a two-party operation: the stored admin authorizes
+/// giving the factory away and the incoming admin authorizes accepting it.
+#[test]
+fn test_transfer_ownership_changes_admin_and_emits_event() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+
+    te.env.mock_auths(&[
+        MockAuth {
+            address: &te.admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+
+    te.factory.transfer_ownership(&new_admin);
+
+    assert_eq!(stored_admin(&te), new_admin);
+
+    // ownership_transferred(old_admin, new_admin)
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.factory_id);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "ownership_transferred")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.admin
+    );
+    assert_eq!(Address::try_from_val(&te.env, &data).unwrap(), new_admin);
+}
+
+/// With only the current admin's authorization, the transfer is rejected
+/// because the incoming admin never consented.
+#[test]
+fn test_transfer_ownership_requires_new_admin_auth() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+
+    te.env.mock_auths(&[MockAuth {
+        address: &te.admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.factory_id,
+            fn_name: "transfer_ownership",
+            args: (new_admin.clone(),).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(te.factory.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(stored_admin(&te), te.admin);
+}
+
+/// With only the new admin's authorization, the transfer is rejected: a
+/// non-admin cannot seize a factory by consenting on its behalf.
+#[test]
+fn test_transfer_ownership_requires_current_admin_auth() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+
+    te.env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.factory_id,
+            fn_name: "transfer_ownership",
+            args: (new_admin.clone(),).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(te.factory.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(stored_admin(&te), te.admin);
+}
+
+/// Even with the incoming admin's consent, an unrelated account cannot move
+/// ownership because the current-admin check fails.
+#[test]
+fn test_transfer_ownership_rejects_unauthorized_caller() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+    let attacker = Address::generate(&te.env);
+
+    te.env.mock_auths(&[
+        MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+
+    assert!(te.factory.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(stored_admin(&te), te.admin);
+}
+
+/// Missing all authorization is rejected rather than treated as an implicit
+/// admin action.
+#[test]
+fn test_transfer_ownership_without_auth_is_rejected() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+
+    te.env.set_auths(&[]);
+    assert!(te.factory.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(stored_admin(&te), te.admin);
+}
+
+/// After the transfer the old admin's key has no residual authority: it can
+/// neither register an asset nor replay the transfer, while the new admin can
+/// register assets.
+#[test]
+fn test_transfer_ownership_moves_registration_authority() {
+    let te = setup();
+    let new_admin = Address::generate(&te.env);
+
+    // Build a pre-existing, correctly initialized pool to register through the
+    // migration path (which, unlike `register_asset`, needs no nested deploy
+    // authorization and so can be driven with a single explicit auth mock).
+    let asset = Address::generate(&te.env);
+    let existing_pool = new_initialized_pool(&te, &asset);
+
+    te.env.mock_auths(&[
+        MockAuth {
+            address: &te.admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (new_admin.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    te.factory.transfer_ownership(&new_admin);
+    assert_eq!(stored_admin(&te), new_admin);
+
+    // The old admin still controls its key, but the factory now checks the new
+    // admin for registration, so the call is rejected and no mapping is written.
+    te.env.mock_auths(&[MockAuth {
+        address: &te.admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.factory_id,
+            fn_name: "register_existing_pool",
+            args: (asset.clone(), existing_pool.clone()).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te
+        .factory
+        .try_register_existing_pool(&asset, &existing_pool)
+        .is_err());
+    assert_eq!(te.factory.get_pool_for_asset(&asset), None);
+
+    // The new admin is now the only key that can mutate asset registration.
+    te.env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.factory_id,
+            fn_name: "register_existing_pool",
+            args: (asset.clone(), existing_pool.clone()).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    te.factory.register_existing_pool(&asset, &existing_pool);
+    assert_eq!(
+        te.factory.get_pool_for_asset(&asset),
+        Some(existing_pool.clone())
+    );
+
+    // Replaying the transfer with the old admin's signature must fail too: the
+    // stored admin is the new admin, which did not authorize this call.
+    let replacement = Address::generate(&te.env);
+    te.env.mock_auths(&[
+        MockAuth {
+            address: &te.admin,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (replacement.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &replacement,
+            invoke: &MockAuthInvoke {
+                contract: &te.factory_id,
+                fn_name: "transfer_ownership",
+                args: (replacement.clone(),).into_val(&te.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(te.factory.try_transfer_ownership(&replacement).is_err());
+    assert_eq!(stored_admin(&te), new_admin);
 }
 
 #[test]
