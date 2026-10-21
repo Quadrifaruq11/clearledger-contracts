@@ -31,6 +31,28 @@ and withdrawals:
 There are **no public `mint`, `burn`, or `burn_from` entry points**. Supply only
 changes through `deposit()` and `withdraw()`.
 
+### Previewing a Withdrawal
+`preview_withdraw(shares)` is the read-only ABI method for the burn formula above. It returns a `WithdrawPreview`:
+
+| Field | Meaning |
+| --- | --- |
+| `usdc_out` | USDC stroops `withdraw` would pay for `shares`, using the same floor division as the write path. |
+| `available_liquidity` | Pool USDC currently available to withdraw (`total_deposits - total_funded`). |
+| `liquidity_ok` | `true` when `available_liquidity >= usdc_out`; otherwise a real withdrawal of those shares would fail with `InsufficientLiquidity`. |
+
+The preview requires no authorization and performs no storage writes, event emission, or TTL extension. It quotes pool-wide share math only; callers should also check the LP's share balance (`balance` / `get_lp_position`) and the pool's pause state before submitting a withdrawal. `withdraw` and `preview_withdraw` share one conversion helper (`usdc_for_withdraw`) so their rounding and dust guard cannot drift.
+
+## Interface Boundary Decision
+
+### Recommendation
+**Direct Implementation:** The `PoolContract` should implement the SEP-41 interface directly, rather than deploying a separate companion token contract.
+
+### Rationale
+- **Simplicity & Gas Savings:** A single contract avoids the complexity of cross-contract calls between the pool and its companion token contract. Minting and burning shares during deposits and withdrawals happens instantly within the same execution context.
+- **State Re-use:** We already store `DataKey::LPShares(Address)` and `DataKey::TotalShares`. Implementing SEP-41 directly allows us to reuse these exact storage keys for `balance` and `total_supply`, bridging the gap seamlessly without duplicating state.
+- **Standard Precedent:** Other Soroban vault and liquidity pool patterns (such as standard AMMs) typically implement the token interface directly on the pool contract.
+
+
 ## Supported interface
 
 `PoolContract` implements the following SEP-41 methods from
